@@ -159,9 +159,8 @@ class StaticRoutePusher:
         cmd_apply = 'cd /home/vagrant/ && source /pkg/bin/ztp_helper.sh && xrapply route.txt'
 
         route_batch = ['router static address-family ipv4 unicast 11.11.11.16/32 10.1.1.20 200',
-                       'router static address-family ipv4 unicast 11.11.11.17/32 10.1.1.20 200']
+                       'router static address-family ipv4 unicast 11.11.11.17/32 10.1.1.20 200', 'commit']
 
-        route_batch.append('commit')
         out = net_connect.send_config_set(route_batch)
         print out
 
