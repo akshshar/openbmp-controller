@@ -190,5 +190,6 @@ event = 'route'
 
 put_queue_value(5)
 
+
 # CLI
 # router static address-family ipv4 unicast 11.11.11.11/32 10.1.1.20 200
