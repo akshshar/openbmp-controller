@@ -1,7 +1,7 @@
 # Open BMP controller for NANOG hackathon
 
-#FROM ubuntu:trusty
-FROM lindt-docker.cisco.com:5000/kafka-slapi
+FROM ubuntu:trusty
+
 
 ADD . /tmp/
 
