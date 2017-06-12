@@ -1,0 +1,3 @@
+{
+  "insecure-registries": ["insecure-registry:5000"]
+}

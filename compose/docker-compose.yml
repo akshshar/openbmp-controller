@@ -1,0 +1,24 @@
+---
+version: '2'
+services:
+  openbmp_aio:
+    image: openbmp/aio
+    container_name: openbmp_aio
+    hostname: openbmp_aio
+    environment:
+      - API_FQDN=192.168.122.1
+    volumes:
+      - "/var/openbmp/mysql:/data/mysql"
+    ports:
+      - 3306:3306
+      - 2181:2181
+      - 5001:5000
+      - 9092:9092
+      - 8001:8001
+
+  kafka_slapi:
+    image: grpc-openbmp
+    container_name: kafka_slapi
+    hostname: kafka-slapi
+    privileged: true
+    tty: true
