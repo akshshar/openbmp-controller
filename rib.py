@@ -5,111 +5,14 @@ from socket import inet_aton, inet_ntoa
 import threading, Queue
 from confluent_kafka import Consumer, KafkaError
 import yaml, time, datetime, json, ipaddress, pdb
+import ast
+from routepolicy import PolicyHandler
+from pathselection import PathSelection
 
 import logging, logging.handlers
 logging.basicConfig()
 logger = logging.getLogger()
 logger.setLevel(logging.DEBUG)
-
-
-class RedisRib(object):
-    '''
-    A base object backed by redis.
-    We will convert our radix tree based structure into json to store in Redis
-    for easy retrieval by external users and to isolate between threads.
-    '''
-
-    def __init__(self, redishost = None, id = None):
-        '''Create or load a RedisObject. The id is the key for the redis entry.
-        For our RIB this ID will be the neighbor that the RIB corresponds to.'''
-
-        self.redis = redis.StrictRedis(host=redishost, decode_responses = True)
-
-        if id:
-            self.id = id
-        else:
-            self.id = base64.urlsafe_b64encode(os.urandom(9)).decode('utf-8')
-
-        if ':' not in self.id:
-            self.id = self.__class__.__name__ + ':' + self.id
-
-    def __bool__(self):
-        '''Test if an object currently exists'''
-
-        return self.redis.exists(self.id)
-
-    def __eq__(self, other):
-        '''Tests if two redis objects are equal (they have the same key)'''
-
-        return self.id == other.id
-
-    def __str__(self):
-        '''Return this object as a string for testing purposes.'''
-
-        return self.id
-
-    def delete(self):
-        '''Delete this object from redis'''
-
-        self.redis.delete(self.id)
-
-
-    def encode_value(self, value):
-        '''To encode the incoming py-radix object, we'll convert into a json format'''
-
-        # The py-radix object coming in contains all the prefixes and associated metadata
-        # for each prefix in a single py-radix object. Convert this into a nested dict.
-        rib = []
-
-        # walk through the current list of nodes in the tree
-        nodes = value.nodes()
-        for node in nodes:
-            entry = {}
-            entry["family"] = node.family
-            entry["network"] = node.network
-            entry["prefix"] = node.prefix
-            entry["prefix_len"] = node.prefixlen
-            entry["attributes"] = node.data
-            rib.append(entry)
-
-        return json.dumps(rib)
-
-
-    def decode_value(self, value):
-        '''Convert the json object back to pyradix for quick handling of prefix matches'''
-
-        ribtree = Radix()
-
-        try:
-            rib = json.loads(value)
-        except ValueError, e:
-            logger.debug("Invalid json, returning None")
-            return None
-
-        try:
-            for entry in rib:
-                ribnode = ribtree.add(str(entry['prefix']))
-                ribnode.data.update(entry["attributes"])
-        except Exception as e:
-            logger.debug("Error while accessing the rib, error is "+str(e))
-
-        return ribtree
-
-
-    def get(self, key):
-        '''
-        Load a field from this redis object.
-        '''
-
-        return self.decode_value(self.redis.hget(self.id, key))
-
-    def set(self, key, val):
-        '''
-        Store a value in this redis object.
-        '''
-
-        self.redis.hset(self.id, key, self.encode_value(val))
-
 
 
 
@@ -132,10 +35,9 @@ class RIB(object):
             entry["network"] = node.network
             entry["prefix"] = node.prefix
             entry["prefix_len"] = node.prefixlen
-            entry["attributes"] = node.data
+            entry["paths"] = node.data
             rib.append(entry)
 
-        logger.debug("Serializing the RIB")
         return rib
 
 
@@ -155,10 +57,11 @@ class RIB(object):
 
             path_hash = route['hash']
             del route['hash']
-            route_attrs = { path_hash : route }
 
-            # add the path to the route attributes
-            ribnode.data.update(route_attrs)
+            route_paths = { str(path_hash) : route }
+
+            # add the path to the route path dictionary
+            ribnode.data.update(route_paths)
             logger.debug("Added the path to the route entry, path hash="+path_hash)
         else:
             #Particular prefix/prefix-len already exists in tree, update the path based on action
@@ -179,32 +82,78 @@ class RIB(object):
                 else:
                     logger.debug("Delete for a path that did not exist already")
             elif route["action"] == "add":
-                route_attrs = { path_hash : route }
-                ribnode.data.update(route_attrs)
+                route_paths = { str(path_hash) : route }
+                ribnode.data.update(route_paths)
                 logger.debug("Path added to the tree, hash="+path_hash)
 
 
 
 class AdjRibPostPolicy(RIB):
 
-    def apply_policy(self):
-       # Perform modification operations on the individual knobs in each
-       # as instructed by the user
-        pass
+    def __init__(self ):
+        self.radixRib = Radix()
+        self.policy  = PolicyHandler()
 
-    def process_msg(self):
-       # Invoked through pub-sub via Redis
-        pass
+    def process_adjInRib(self, node_hash, redisClient):
+        # Got an event for the node, obtain the current RIB from redis based off node hash
+        adjInRib = ast.literal_eval(redisClient.hget(node_hash, 'adjInRib'))
 
+        if adjInRib:
+           for route in adjInRib:
+               route = self.policy.process_route(route)
+               ribnode = self.radixRib.search_exact(str(route['prefix']))
+        
+               if ribnode is None:
+                   # Particular prefix/prefix-len does not exist in tree, create the node
+                   ribnode = self.radixRib.add(str(route['prefix']))
 
+                   # Create a dictionary with only the path information and path hash as the key
+                   for key in ['prefix', 'prefix_len']:
+                       del route[key]
+
+                   ribnode.data.update(route['paths'])
+                
+               else:
+                   #Particular prefix/prefix-len already exists in tree, update the path based on action
+                   # Create a dictionary with only the path information and path hash as the key
+                   for key in ['prefix', 'prefix_len']:
+                       del route[key]
+                   ribnode.data.update(route['paths'])
+          
+           
 class LocalRib(RIB):
 
-    def path_selection(self):
+    def __init__(self ):
+        self.radixRib = Radix()
+        self.pathselection  = PathSelection()
 
-        pass
+    def process_adjInRibPP(self, node_hash, redisClient):
+        # Got an event for the node, obtain the current RIB from redis based off node hash
+        print redisClient.hget(node_hash, 'adjInRibPP')
+        adjInRibPP = ast.literal_eval(redisClient.hget(node_hash, 'adjInRibPP'))
+        if adjInRibPP:
+           for route in adjInRibPP:
+               print "route from AdjInRibPP ="
+               print route
+               route = self.pathselection.process_route(route)
+               print "route for localrib = "
+               print route
+               ribnode = self.radixRib.search_exact(str(route['prefix']))
 
-    def process_msg(self):
-    # Invoked through pub-sub via Redis
-        pass
+               if ribnode is None:
+                   # Particular prefix/prefix-len does not exist in tree, create the node
+                   ribnode = self.radixRib.add(str(route['prefix']))
 
+                   # Create a dictionary with only the path information and path hash as the key
+                   for key in ['prefix', 'prefix_len']:
+                       del route[key]
+
+                   ribnode.data.update(route['paths'])
+
+               else:
+                   #Particular prefix/prefix-len already exists in tree, update the path based on action
+                   # Create a dictionary with only the path information and path hash as the key
+                   for key in ['prefix', 'prefix_len']:
+                       del route[key]
+                   ribnode.data.update(route['paths'])
 

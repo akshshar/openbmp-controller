@@ -1,7 +1,7 @@
 from confluent_kafka import Consumer, KafkaError
 import yaml, time, datetime, json, ipaddress, pdb
 import threading, Queue, argparse
-from rib import RIB
+from rib import RIB, LocalRib, AdjRibPostPolicy
 import signal, sys
 from functools import partial
 import redis
@@ -34,7 +34,7 @@ class BGPPeer(object):
         peer = {'remote_asn' : self.remote_asn,
                  'local_asn' : self.local_asn,
                  'attributes': self.data}
-        return peer
+        return json.dumps(peer)
 
 class Node(object):
     def __init__(self,
@@ -48,6 +48,9 @@ class Node(object):
         self.ipaddr = ipaddr
         self.data = {}
         self.adjInRib = RIB()
+        self.adjInRibPP = AdjRibPostPolicy()
+        self.localRib = LocalRib()
+
         if data is not None:
             self.data.update(data)
 
@@ -56,13 +59,14 @@ class Node(object):
 
     def serialize(self):
         peerset = {}
-        for peer in self.peers:
+        for peer in self.peers.keys():
             peerset.update({ peer : self.peers[peer].serialize()})
 
         node = {'name' : self.name,
                 'ipaddr' : self.ipaddr,
                 'peers': peerset,
-                'adjInRib' : self.adjInRib.serialize()}
+                'adjInRib' : self.adjInRib.serialize(),
+                'adjInRibPP' : self.adjInRibPP.serialize()}
         return node
  
     def add_peer(self, peer_msg):
@@ -99,6 +103,7 @@ class BMPNodes(object):
         else:
             self.redis = redis.StrictRedis(host=redishost)
             self.redis.flushall()
+            self.pubsub = self.redis.pubsub()
 
         self.event = threading.Event()
         self.threadList = []
@@ -109,7 +114,10 @@ class BMPNodes(object):
         if bootstrap_server is not None:
             self.bootstrap_server = bootstrap_server
 
-            for fn in [self.capture_router_msg, self.capture_peer_msg, self.capture_prefix_msg]:
+            for fn in [self.capture_router_msg,
+                       self.capture_peer_msg,
+                       self.capture_prefix_msg,
+                       self.redis_listener]:
                 thread = threading.Thread(target=fn, args=())
                 self.threadList.append(thread)
                 thread.daemon = True                            # Daemonize thread
@@ -120,10 +128,13 @@ class BMPNodes(object):
         self.dispatch = {'init' : self.add_router,
                          'term' : self.delete_router}
 
+        self.redis_dispatch = {'AdjInRib' : self.adjRibPolicyWorker,
+                               'AdjInRibPP' : self.localRibWorker}
+
 
     def get_nodes(self):
         nodeset = {}
-        for node in self.nodes:
+        for node in self.nodes.keys():
             rtr = self.nodes[node]
             nodeset.update({str(rtr.name)+':'+str(rtr.ipaddr) : node})
             # Also provide the reverse mapping
@@ -132,7 +143,7 @@ class BMPNodes(object):
 
     def serialize(self):
         nodeset = {}
-        for node in self.nodes:
+        for node in self.nodes.keys():
             nodeset.update({node : self.nodes[node].serialize()})
 
         return nodeset
@@ -185,21 +196,81 @@ class BMPNodes(object):
             logger.debug("Received a del event for a non-existent peer, ignore")
 
 
-    def update_redis(self):
+    def update_redis(self, channel=None):
         # Called to reflect latest state when new messages are received. 
         nodes = {}
         if self.get_nodes():
             self.redis.hmset("routers", self.get_nodes())    
-            for node in self.nodes:
+            for node in self.nodes.keys():
                 self.redis.hmset(node, self.nodes[node].serialize())
 
-    def update_redis_test(self):
-        # Called to reflect latest state when new messages are received. 
+        if channel:
+            # Publish message to redis Listeners
+            self.redis.publish(channel,"Publish to "
+                                       +str(self.redis_dispatch[channel].__name__)
+                                       +" worker")
+
+    def redis_listener(self):
+        self.pubsub.subscribe(['AdjInRib', 'AdjInRibPP'])
+        pill = ''
+        try:
+            while True:
+                try:
+                    pill = self.poisonpillq.get_nowait()
+                except Queue.Empty:
+                    pass
+
+                if isinstance(pill, str) and pill == "quit":
+                    raise self.PoisonPillException
+
+                for item in self.pubsub.listen():
+                    print item
+                    logger.debug("Received Redis event")
+                    if item['data'] == "quit":
+                        self.pubsub.unsubscribe()
+                        logger.debug("unsubscribed and finished redis pubsub listener")
+                        raise self.PoisonPillException
+                    else:
+                        print "item is =" 
+                        print item
+                        print "redis dispatch is="
+                        print self.redis_dispatch
+
+                        if item['channel'] in self.redis_dispatch:
+                            print "Here"
+                            print item['channel']
+                            print self.redis_dispatch[item['channel']].__name__
+                            self.redis_dispatch[item['channel']]()
+
+        except self.PoisonPillException:
+            print "Poison Pill received"
+            print "Quitting the redis Listener thread"
+            return
+
+        except Exception as e:
+            print "Exception occurred while listening for redis events"
+            print "Error is " +str(e)
+            return
+
+
+    def adjRibPolicyWorker(self):
+        logger.debug("Received an AdjInRib event")
+        # walk through the nodes and apply available policies 
         nodes = {}
         if self.get_nodes():
-            self.redis.hmset("routers", self.get_nodes())
-            for node in self.nodes:
-                self.redis.hmset(node, self.nodes[node].serialize())
+            for node in self.nodes.keys():
+                # process and apply policies
+                self.nodes[node].adjInRibPP.process_adjInRib(node, self.redis)
+
+
+    def localRibWorker(self):
+        print "Received an AdjInRibPP event"
+            # walk through the nodes and apply available path selection algorithms
+        nodes = {}
+        if self.get_nodes():
+            for node in self.nodes.keys():
+               # process and do path selection
+                self.nodes[node].localRib.process_adjInRibPP(node, self.redis)
 
  
     def capture_router_msg(self):
@@ -392,7 +463,7 @@ class BMPNodes(object):
                         unicast_prefix = UnicastPrefix(m)
                         logger.debug('Received Message (' + t_stamp + ') : ' + m_tag + '(V: ' + str(m.version) + ')')
                         logger.debug(unicast_prefix.to_json_pretty())
-                        prefix_msg = json.loads(unicast_prefix.to_json_pretty())
+                        prefix_msg = yaml.safe_load(unicast_prefix.to_json_pretty())
 
                         for msg in prefix_msg:
                             processed = False
@@ -406,7 +477,8 @@ class BMPNodes(object):
                                     self.event.wait(PREFIX_MSG_DAMPENING_TIMER)
 
                         # Go ahead and update Redis
-                        self.update_redis()
+                        self.update_redis('AdjInRib')
+                        self.update_redis('AdjInRibPP')
 
         except self.PoisonPillException:
             logger.debug("Poison Pill received")
