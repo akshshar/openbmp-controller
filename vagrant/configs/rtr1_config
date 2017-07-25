@@ -1,0 +1,79 @@
+!
+hostname rtr1
+!
+interface Loopback0
+ ipv4 address 1.1.1.1 255.255.255.255
+!
+interface Loopback1
+ ipv4 address 6.6.6.6 255.255.255.255
+!
+interface GigabitEthernet0/0/0/0
+ ipv4 address 10.1.1.10 255.255.255.0
+ no shutdown
+!
+interface GigabitEthernet0/0/0/1
+ ipv4 address 11.1.1.10 255.255.255.0
+ no shutdown
+!
+interface GigabitEthernet0/0/0/2
+ ipv4 address 12.1.1.10 255.255.255.0
+ no shutdown
+!
+route-policy PASS
+  pass
+end-policy
+!
+route-policy ebgp-localpref
+  if next-hop in (11.1.1.20) then
+    set local-preference 250
+  endif
+end-policy
+!
+route-policy quickstart-drop
+  drop
+end-policy
+!
+router ospf apphost
+ area 0
+  interface Loopback0
+  !
+  interface GigabitEthernet0/0/0/0
+  !
+ !
+!
+router bgp 65000
+ address-family ipv4 unicast
+  redistribute connected
+ !
+ neighbor 2.2.2.2
+  remote-as 65000
+  bmp-activate server 1
+  update-source Loopback0
+  address-family ipv4 unicast
+  !
+ !
+ neighbor 11.1.1.20
+  remote-as 65001
+  bmp-activate server 1
+  address-family ipv4 unicast
+   route-policy ebgp-localpref in
+   route-policy PASS out
+  !
+ !
+!
+bmp server 1
+ host 12.1.1.20 port 5000
+!
+grpc
+ port 57777
+ address-family ipv4
+ service-layer
+ !
+!
+netconf-yang agent
+ ssh
+!
+ssh server v2
+ssh server vrf default
+ssh server netconf vrf default
+end
