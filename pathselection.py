@@ -9,6 +9,7 @@ class PathSelection(object):
     def process_route(self, route):
 
         for path in route['paths'].keys():
-            if route['paths'][path]['med'] != 40:
-                del route['paths'][path]
+            if route['paths'][path]['action'] == 'add':
+                if route['paths'][path]['med'] != 40:
+                    del route['paths'][path]
         return route

@@ -1,10 +1,10 @@
-from confluent_kafka import Consumer, KafkaError
+from confluent_kafka import Consumer, Producer, KafkaError
 import yaml, time, datetime, json, ipaddress, pdb
 import threading, Queue, argparse
 from rib import RIB, LocalRib, AdjRibPostPolicy
-import signal, sys
+import signal, os
 from functools import partial
-import redis
+import redis, ast
 
 import logging, logging.handlers
 logging.basicConfig()
@@ -18,6 +18,7 @@ from openbmp.api.parsed.message import UnicastPrefix
 
 PREFIX_MSG_DAMPENING_TIMER=2
 PEER_MSG_DAMPENING_TIMER=2
+RIB_PRODUCER_WAIT_INTERVAL=5
 
 class BGPPeer(object):
     def __init__(self,
@@ -34,7 +35,7 @@ class BGPPeer(object):
         peer = {'remote_asn' : self.remote_asn,
                  'local_asn' : self.local_asn,
                  'attributes': self.data}
-        return json.dumps(peer)
+        return peer
 
 class Node(object):
     def __init__(self,
@@ -66,7 +67,8 @@ class Node(object):
                 'ipaddr' : self.ipaddr,
                 'peers': peerset,
                 'adjInRib' : self.adjInRib.serialize(),
-                'adjInRibPP' : self.adjInRibPP.serialize()}
+                'adjInRibPP' : self.adjInRibPP.serialize(),
+                'localRib' : self.localRib.serialize()}
         return node
  
     def add_peer(self, peer_msg):
@@ -105,11 +107,14 @@ class BMPNodes(object):
             self.redis.flushall()
             self.pubsub = self.redis.pubsub()
 
-        self.event = threading.Event()
+        self.routerevent = threading.Event()
+        self.peerevent = threading.Event()
         self.threadList = []
         self.poisonpillq = Queue.Queue()
         self.peer_consumer = None
         self.router_consumer = None
+        self.prefix_consumer =  None
+        self.rib_producer = None 
 
         if bootstrap_server is not None:
             self.bootstrap_server = bootstrap_server
@@ -129,7 +134,8 @@ class BMPNodes(object):
                          'term' : self.delete_router}
 
         self.redis_dispatch = {'AdjInRib' : self.adjRibPolicyWorker,
-                               'AdjInRibPP' : self.localRibWorker}
+                               'AdjInRibPP' : self.localRibWorker,
+                               'localRib' : self.kafkaWorker}
 
 
     def get_nodes(self):
@@ -152,12 +158,15 @@ class BMPNodes(object):
         pass
 
     def consumer_cleanup(self):
-        logger.info("Cleaning up, exiting the active threads")
+        logger.debug("Cleaning up, exiting the active threads")
         for thread in self.threadList:
             self.poisonpillq.put("quit")
 
+        # The redis listener will need the poisonpill channel publish
+        self.redis.publish('poisonpill' , "quit")
+
         for thread in self.threadList:
-            logger.info("Waiting for %s to finish..." %(thread.name))
+            logger.debug("Waiting for %s to finish..." %(thread.name))
             thread.join()
         return
 
@@ -211,67 +220,103 @@ class BMPNodes(object):
                                        +" worker")
 
     def redis_listener(self):
-        self.pubsub.subscribe(['AdjInRib', 'AdjInRibPP'])
+        self.pubsub.subscribe(['AdjInRib', 'AdjInRibPP', 'localRib', 'poisonpill'])
         pill = ''
         try:
             while True:
-                try:
-                    pill = self.poisonpillq.get_nowait()
-                except Queue.Empty:
-                    pass
-
-                if isinstance(pill, str) and pill == "quit":
-                    raise self.PoisonPillException
-
                 for item in self.pubsub.listen():
-                    print item
-                    logger.debug("Received Redis event")
+                    logger.info("Received Redis event")
                     if item['data'] == "quit":
                         self.pubsub.unsubscribe()
                         logger.debug("unsubscribed and finished redis pubsub listener")
                         raise self.PoisonPillException
                     else:
-                        print "item is =" 
-                        print item
-                        print "redis dispatch is="
-                        print self.redis_dispatch
-
                         if item['channel'] in self.redis_dispatch:
-                            print "Here"
-                            print item['channel']
-                            print self.redis_dispatch[item['channel']].__name__
                             self.redis_dispatch[item['channel']]()
 
         except self.PoisonPillException:
-            print "Poison Pill received"
-            print "Quitting the redis Listener thread"
             return
 
         except Exception as e:
-            print "Exception occurred while listening for redis events"
-            print "Error is " +str(e)
+            logger.debug("Error while listening to redis events")
+            logger.debug("Error is" +str(e))
             return
 
 
     def adjRibPolicyWorker(self):
         logger.debug("Received an AdjInRib event")
         # walk through the nodes and apply available policies 
-        nodes = {}
+        #nodes = {}
         if self.get_nodes():
             for node in self.nodes.keys():
                 # process and apply policies
                 self.nodes[node].adjInRibPP.process_adjInRib(node, self.redis)
 
+        self.update_redis('AdjInRibPP')
 
     def localRibWorker(self):
-        print "Received an AdjInRibPP event"
             # walk through the nodes and apply available path selection algorithms
-        nodes = {}
+        #nodes = {}
         if self.get_nodes():
             for node in self.nodes.keys():
                # process and do path selection
                 self.nodes[node].localRib.process_adjInRibPP(node, self.redis)
+               
 
+        self.update_redis('localRib')
+    # Optional per-message delivery callback (triggered by poll() or flush())
+    # during the rib stream to kafka when a message has been successfully delivered
+    # or permanently failed delivery (after retries).
+
+    @staticmethod
+    def delivery_callback(err, msg):
+        if err:
+            logger.debug('%% Message failed delivery: %s\n' % err)
+        else:
+            logger.debug('%% Message delivered to %s [%d]\n' %
+                             (msg.topic(), msg.partition()))
+
+
+    def kafkaWorker(self):
+        # With the local Rib ready, push routes to Kafka. This is meant to 
+        # serve as a streaming set of routes to router clients which will be
+        # kafka consumers. This is NOT a way to resync if the router dies or 
+        # router client disconnects - for that sync with the redis database
+        # first and then start listening to fresh messages from Kafka for route events. 
+
+        self.rib_producer = Producer({'bootstrap.servers': self.bootstrap_server})
+
+        if self.get_nodes():
+            for node in self.nodes.keys():
+               
+               topic =  self.nodes[node].hash
+               
+               # fetch localRib routes from Redis, push to Kafka bus
+               localRib = ast.literal_eval(self.redis.hget(node, 'localRib'))
+               if localRib:
+                   for route in localRib:
+                       logger.debug(route)
+                    #   self.shuttler.rtQueue.put(route) 
+                       try:
+                           self.rib_producer.produce(topic, value=json.dumps(route), callback=self.delivery_callback)
+                           self.rib_producer.poll(0)
+                       except BufferError as e:
+                           logger.debug('%% Local producer queue is full (%d messages awaiting delivery): try again\n' %
+                           len(self.rib_producer))
+                           #  putting the poll() first to block until there is queue space available. 
+                           # This blocks for RIB_PRODUCER_WAIT_INTERVAL seconds because  message delivery can take some time
+                           # if there are temporary errors on the broker (e.g., leader failover).    
+                           self.rib_producer.poll(RIB_PRODUCER_WAIT_INTERVAL*1000) 
+      
+                           # Now try again when there is hopefully some free space on the queue
+                           self.rib_producer.produce(topic, value=json.dumps(route), callback=self.delivery_callback)
+
+
+                   # Wait until all messages have been delivered
+                   logger.debug('%% Waiting for %d deliveries\n' % len(self.rib_producer))
+                   self.rib_producer.flush()
+
+ 
  
     def capture_router_msg(self):
         pill = ''
@@ -298,7 +343,7 @@ class BMPNodes(object):
                     raise self.PoisonPillException
 
                 if msg is None:
-                    self.event.set()
+                    self.routerevent.set()
                     continue
                 if msg.error():
                     # Error or event
@@ -320,12 +365,12 @@ class BMPNodes(object):
                         router = Router(m)
                         logger.debug('Received Message (' + t_stamp + ') : ' + m_tag + '(V: ' + str(m.version) + ')')
                         logger.debug(router.to_json_pretty())
-                        router_msg = json.loads(router.to_json_pretty())
+                        router_msg = yaml.safe_load(router.to_json_pretty())
                         logger.debug("Calling process msg for Router messages")
                         bmpnodes.process_msg(router_msg)
                         # update redis 
                         self.update_redis()
-                        self.event.clear()
+                        self.routerevent.clear()
 
         except self.PoisonPillException:
             logger.debug("Poison Pill received")
@@ -367,6 +412,7 @@ class BMPNodes(object):
 
 
                 if msg is None:
+                    self.peerevent.set()
                     continue
                 if msg.error():
                     # Error or event
@@ -389,7 +435,7 @@ class BMPNodes(object):
                         peer = Peer(m)
                         logger.debug('Received Message (' + t_stamp + ') : ' + m_tag + '(V: ' + str(m.version) + ')')
                         logger.debug(peer.to_json_pretty())
-                        peer_msg = json.loads(peer.to_json_pretty())
+                        peer_msg = yaml.safe_load(peer.to_json_pretty())
                         for msg in peer_msg:
                             processed = False
                             while not processed:
@@ -399,10 +445,11 @@ class BMPNodes(object):
                                 else:
                                     logger.debug("Received peer message for currently unknown Router, hash="+str(msg['router_hash']))
                                     logger.debug("Let's wait for router_msg event to be set")
-                                    self.event.wait(PEER_MSG_DAMPENING_TIMER)
+                                    self.routerevent.wait(PEER_MSG_DAMPENING_TIMER)
 
                         # Go ahead and update Redis
                         self.update_redis()
+                        self.peerevent.clear()
  
         except self.PoisonPillException:
             logger.debug("Poison Pill received")
@@ -474,11 +521,10 @@ class BMPNodes(object):
                                 else:
                                     logger.debug("Received peer message for currently unknown Router, hash="+str(msg['router_hash']))
                                     logger.debug("Let's wait for router_msg event to be set")
-                                    self.event.wait(PREFIX_MSG_DAMPENING_TIMER)
+                                    self.peerevent.wait(PREFIX_MSG_DAMPENING_TIMER)
 
                         # Go ahead and update Redis
                         self.update_redis('AdjInRib')
-                        self.update_redis('AdjInRibPP')
 
         except self.PoisonPillException:
             logger.debug("Poison Pill received")
@@ -503,7 +549,7 @@ def handler(bmpnodes, signum, frame):
         EXIT_FLAG = True
         logger.info("Cleaning up...")
         bmpnodes.consumer_cleanup()
-        sys.exit(0)
+        os._exit(0)
 
         
 if __name__ == "__main__":
@@ -512,10 +558,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('-f', '--file', action='store', dest='route_policy',
                     help='Specify the YAML file describing user defined rules for netlink route import')
-    parser.add_argument('-i', '--server-ip', action='store', dest='server_ip',
-                    help='Specify the IOS-XR GRPC server IP address', required=True)
-    parser.add_argument('-p', '--server-port', action='store', dest='server_port',
-                    help='Specify the IOS-XR GRPC server port', required=True)
+    parser.add_argument('-r', '--redis-host', action='store', dest='redis_host',
+                    help='Specify the Redis Server IP', required=True)
     parser.add_argument('-b', '--bootstrap-server', action='store', dest='bootstrap_server',
                     help='Specify hostname of the kafka cluster', required=True)
     parser.add_argument('-v', '--verbose', action='store_true',
@@ -528,16 +572,10 @@ if __name__ == "__main__":
         logger.setLevel(logging.DEBUG)
 
 
-    if results.server_ip and results.server_port:
-        server_ip = results.server_ip
-        server_port = int(results.server_port)
-
-
     bootstrap_server = results.bootstrap_server
-    bmpnodes = BMPNodes(bootstrap_server, redishost='10.30.110.214')
+    bmpnodes = BMPNodes(bootstrap_server, redishost=results.redis_host)
 
 
-    pdb.set_trace()
     # Register our handler for keyboard interrupt and termination signals
     signal.signal(signal.SIGINT, partial(handler, bmpnodes))
     signal.signal(signal.SIGTERM, partial(handler, bmpnodes))
