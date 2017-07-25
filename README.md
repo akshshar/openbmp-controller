@@ -1,4 +1,9 @@
-![openbmp-slapi-demo](images/openbmp-slapi.png)
+## Setup:
+![setup-openbmp-controller](images/setup-openbmp-controller.png)
+
+
+## Architecture
+![architecture-openbmp-controller](images/architecture-openbmp-controller.png)
 
 ## Running the demo
 
