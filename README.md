@@ -1,9 +1,9 @@
 ## Setup:
-![setup-openbmp-controller](images/setup-openbmp-controller.png)
+![setup-openbmp-controller](images/setup_openbmp_controller.png)
 
 
 ## Architecture
-![architecture-openbmp-controller](images/architecture-openbmp-controller.png)
+![architecture-openbmp-controller](images/architecture_openbmp_controller.png)
 
 ## Running the demo
 
