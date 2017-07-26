@@ -14,7 +14,8 @@ The basic steps are as follows:
 **Vagrant:**  
 
 *  Have Vagrant and Virtualbox installed
-*  Make sure you have access to an SL-API enabled IOS-XR vagrant box. If you don't have it,contact  <mailto:akshshar@cisco.com>
+*  Make sure you have access to an SL-API enabled IOS-XR vagrant box. If you don't have it get access to the IOS-XR vagrant box 
+   (version = 6.1.2) by following this tutorial:  <https://xrdocs.github.io/application-hosting/tutorials/iosxr-vagrant-quickstart>
 
 **Docker:**  
 
