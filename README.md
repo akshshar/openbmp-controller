@@ -1,5 +1,6 @@
-## Setup:
-![setup-openbmp-controller](images/setup_openbmp_controller.png)
+## Basic Premise
+To gain control over the BGP RIB tables, all the routes learnt by the router under scrutiny will be dropped by a route policy. The Adj-in-Rib is learnt over BMP by the controller, is manipulated and then fed back over Service Layer APIs in IOS-XR (or equivalent RIB API in case of other vendors).
+![setup-openbmp-controller](images/openbmp_setup.png)
 
 
 ## Architecture
