@@ -50,6 +50,7 @@ router bgp 65000
   bmp-activate server 1
   update-source Loopback0
   address-family ipv4 unicast
+   route-policy quickstart-drop in
   !
  !
  neighbor 11.1.1.20

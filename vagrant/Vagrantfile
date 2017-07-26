@@ -93,12 +93,12 @@ Vagrant.configure(2) do |config|
 
       devbox.vm.provision "setup_openbmp", type: "shell" do |s|
           s.path =  "scripts/setup_openbmp.sh"
-          s.env = {"http_proxy" => "#{ENV['http_proxy']}", "https_proxy" => "#{ENV['https_proxy']}"}
+          s.env = {"http_proxy" => "#{ENV['http_proxy']}", "https_proxy" => "#{ENV['https_proxy']}", "insecure_registry" => "#{ENV['insecure_registry']}"}
       end
 
       devbox.vm.provider "virtualbox" do |v|
-         v.memory = 4096
-         v.cpus = 2
+         v.memory = 6184
+         v.cpus = 3
      end
     end
 

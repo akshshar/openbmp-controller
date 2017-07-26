@@ -6,38 +6,37 @@ services:
     container_name: openbmp_aio
     hostname: openbmp_aio
     environment:
-      - API_FQDN=12.1.1.10
+      - API_FQDN=12.1.1.20
     volumes:
       - "/var/openbmp/mysql:/data/mysql"
     ports:
       - 3306:3306
       - 2181:2181
-      - 5001:5000
+      - 5000:5000
       - 9092:9092
       - 8001:8001
 
   controller:
-    image: akshshar/grpc-openbmp
+    image: controller:latest
     container_name: controller
     hostname: controller
     volumes:
-      - "/vagrant/lib:/"
+      - "/vagrant/lib:/data/lib"
     privileged: true
     tty: true
 
   redisrib:
-    image: redis-server 
+    image: redis
     container_name: redisrib
     hostname: redisrib
     ports:
       - 6379:6379
+    tty: true
 
   rshuttle:
-    image: akshshar/grpc-openbmp
+    image: grpcio:latest
     container_name: rshuttle
-    hostname: redisrib
+    hostname: rshuttle
     volumes:
-      - "/vagrant/route-shuttle:/"
-    ports:
-      - 6379:6379
-
+      - "/home/vagrant/route-shuttle:/data/route-shuttle"
+    tty: true

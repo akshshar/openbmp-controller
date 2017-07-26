@@ -4,7 +4,7 @@ from radix import Radix
 from socket import inet_aton, inet_ntoa
 import threading, Queue
 from confluent_kafka import Consumer, KafkaError
-import yaml, time, datetime, json, ipaddress, pdb
+import yaml, time, datetime, json, pdb
 import ast
 from routepolicy import PolicyHandler
 from pathselection import PathSelection

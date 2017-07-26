@@ -1,5 +1,5 @@
 from confluent_kafka import Consumer, Producer, KafkaError
-import yaml, time, datetime, json, ipaddress, pdb
+import yaml, time, datetime, json, pdb
 import threading, Queue, argparse
 from rib import RIB, LocalRib, AdjRibPostPolicy
 import signal, os
@@ -556,8 +556,6 @@ if __name__ == "__main__":
 
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('-f', '--file', action='store', dest='route_policy',
-                    help='Specify the YAML file describing user defined rules for netlink route import')
     parser.add_argument('-r', '--redis-host', action='store', dest='redis_host',
                     help='Specify the Redis Server IP', required=True)
     parser.add_argument('-b', '--bootstrap-server', action='store', dest='bootstrap_server',
