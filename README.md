@@ -149,7 +149,7 @@ CONTAINER ID        IMAGE               COMMAND                  CREATED        
 f408c46e6047        openbmp/aio         "/usr/sbin/run_all..."   2 hours ago         Up 2 hours          0.0.0.0:2181->2181/tcp, 0.0.0.0:3306->3306/tcp, 0.0.0.0:5000->5000/tcp, 0.0.0.0:8001->8001/tcp, 0.0.0.0:9092->9092/tcp, 9999/tcp   openbmp_aio
 ea4270c3dba6        controller:latest   "/bin/bash"              2 hours ago         Up 2 hours                                                                                                                                             controller
 35dc15073b61        redis               "docker-entrypoint..."   2 hours ago         Up 2 hours          0.0.0.0:6379->6379/tcp                                                                                                             redisrib
-aa4923d9ff81        grpcio:latest       "/bin/bash"              2 hours ago         Up 2 hours                                                                  
+aa4923d9ff81        grpcio:latest       "/bin/bash"              2 hours ago         Up 2 hours                                                                                                                                             rshuttle                                  
 
 ```
 
