@@ -1,0 +1,3 @@
+[submodule "vagrant/compose/docker/grpcio/route-shuttle"]
+	path = vagrant/compose/docker/grpcio/route-shuttle
+	url = https://github.com/akshshar/route-shuttle
