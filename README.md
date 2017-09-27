@@ -31,7 +31,7 @@ The basic steps are as follows:
 *  Clone the git repository:
 
 ```
-git clone https://github.com/akshshar/openbmp-controller.git
+git clone --recursive https://github.com/akshshar/openbmp-controller.git
 
 ```
 
